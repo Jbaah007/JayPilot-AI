@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (FastAPI tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+
+    # Throwaway database that exists only for this job.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: jaypilot_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d jaypilot_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_NAME: jaypilot_test
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DATABASE_URL: ""
+      # SMTP is faked inside the tests; no mail is ever sent from CI.
+      SMTP_HOST: smtp.test.invalid
+      SMTP_PORT: "587"
+      SMTP_USE_TLS: "true"
+      SMTP_USERNAME: ci@example.test
+      SMTP_FROM_EMAIL: ci@example.test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Generate per-run test secrets
+        run: |
+          jwt="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          smtp="$(python -c 'import secrets; print(secrets.token_urlsafe(16))')"
+          echo "::add-mask::$jwt"
+          echo "::add-mask::$smtp"
+          echo "JWT_SECRET_KEY=$jwt" >> "$GITHUB_ENV"
+          echo "SMTP_PASSWORD=$smtp" >> "$GITHUB_ENV"
+
+      - name: Byte-compile sources
+        run: python -m compileall -q main.py database.py models.py routers services migrations
+
+      - name: Run tests
+        run: python -m pytest tests -v
+
+  frontend:
+    name: Frontend (lint, types, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
+      # Route types (e.g. LayoutProps) are generated and gitignored, so create them first.
+      - name: TypeScript
+        run: |
+          npx next typegen
+          npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
+
+  docker:
+    name: Docker images and Compose config
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false
+          tags: jaypilot-backend:ci
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          tags: jaypilot-frontend:ci
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
+
+      # compose.yaml requires backend/.env and POSTGRES_PASSWORD; use placeholders only.
+      - name: Validate Compose file
+        env:
+          POSTGRES_PASSWORD: ci-placeholder-not-a-secret
+        run: |
+          cp backend/.env.example backend/.env
+          docker compose config --quiet
