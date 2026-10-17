@@ -1,0 +1,98 @@
+# Production stack for a small host (EC2 t3.micro, 1 GB RAM). Pulls prebuilt images; never builds.
+#   docker compose -f compose.prod.yaml pull && docker compose -f compose.prod.yaml up -d
+# Needs: ./.env (GHCR_OWNER, POSTGRES_PASSWORD, ...) and ./backend/.env (app secrets). Neither is committed.
+name: jaypilot-prod
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  frontend:
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER (lowercase GitHub user) in .env}/jaypilot-frontend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "80:3000"
+    environment:
+      # Server-side proxy target; the browser only ever talks to this frontend.
+      BACKEND_INTERNAL_URL: http://backend:8000
+      NODE_OPTIONS: --max-old-space-size=160
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks: [public]
+    mem_limit: 256m
+    logging: *default-logging
+
+  backend:
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER (lowercase GitHub user) in .env}/jaypilot-backend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    # No published ports: only the frontend container can reach the API.
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: ""
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-jaypilot_db}
+      DB_USER: ${POSTGRES_USER:-jaypilot_dev}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PORT: "587"
+      SMTP_USE_TLS: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    # Needs the private network for the database and the public one for outbound (Gmail, Adzuna).
+    networks: [private, public]
+    mem_limit: 256m
+    logging: *default-logging
+
+  db:
+    # Alpine keeps the image small. This is a fresh volume, so it does not affect your dev (Debian) data.
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-jaypilot_db}
+      POSTGRES_USER: ${POSTGRES_USER:-jaypilot_dev}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=48MB
+      - -c
+      - effective_cache_size=128MB
+      - -c
+      - work_mem=2MB
+      - -c
+      - maintenance_work_mem=16MB
+      - -c
+      - max_connections=25
+    volumes:
+      - jaypilot-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    # Internal-only network: no host port, no route to or from the internet.
+    networks: [private]
+    mem_limit: 192m
+    logging: *default-logging
+
+networks:
+  public:
+  private:
+    internal: true
+
+volumes:
+  jaypilot-postgres-data:
