@@ -90,18 +90,7 @@ compose.prod.yaml         production stack (pulls prebuilt images)
 .github/workflows/        ci.yml and publish-images.yml
 ```
 
-## Screenshots
 
-Screenshots will be added to `docs/screenshots/`. Planned images:
-
-| Screen | Placeholder |
-|---|---|
-| Landing page | _Screenshot to be added_ |
-| Create account and email verification | _Screenshot to be added_ |
-| Resume upload and candidate profile | _Screenshot to be added_ |
-| Job search results with match details | _Screenshot to be added_ |
-| Saved jobs | _Screenshot to be added_ |
-| Application tracker | _Screenshot to be added_ |
 
 ## Running locally with Docker Compose
 
